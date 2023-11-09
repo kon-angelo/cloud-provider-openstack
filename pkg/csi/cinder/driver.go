@@ -22,11 +22,12 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/klog/v2"
+
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
 	"k8s.io/cloud-provider-openstack/pkg/version"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -57,7 +58,7 @@ type CinderDriver = Driver
 
 type Driver struct {
 	name      string
-	fqVersion string //Fully qualified version in format {Version}@{CPO version}
+	fqVersion string // Fully qualified version in format {Version}@{CPO version}
 	endpoint  string
 	cluster   string
 
@@ -166,12 +167,19 @@ func (d *Driver) GetVolumeCapabilityAccessModes() []*csi.VolumeCapability_Access
 	return d.vcap
 }
 
-func (d *Driver) SetupDriver(cloud openstack.IOpenStack, mount mount.IMount, metadata metadata.IMetadata) {
-
-	d.ids = NewIdentityServer(d)
-	d.cs = NewControllerServer(d, cloud)
-	d.ns = NewNodeServer(d, mount, metadata, cloud)
-
+func (d *Driver) SetupDriver(mode openstack.Mode, cloud openstack.IOpenStack, mount mount.IMount, metadata metadata.IMetadata) {
+	switch mode {
+	case openstack.NodeMode:
+		d.ids = NewIdentityServer(d)
+		d.ns = NewNodeServer(d, mount, metadata, cloud)
+	case openstack.ControllerMode:
+		d.ids = NewIdentityServer(d)
+		d.cs = NewControllerServer(d, cloud)
+	default:
+		d.ids = NewIdentityServer(d)
+		d.cs = NewControllerServer(d, cloud)
+		d.ns = NewNodeServer(d, mount, metadata, cloud)
+	}
 }
 
 func (d *Driver) Run() {
