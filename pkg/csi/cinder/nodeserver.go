@@ -20,11 +20,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/gophercloud/gophercloud/openstack/blockstorage/v3/volumes"
 	"github.com/kubernetes-csi/csi-lib-utils/protosanitizer"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
@@ -32,12 +30,12 @@ import (
 	"k8s.io/klog/v2"
 	utilpath "k8s.io/utils/path"
 
+	mountutil "k8s.io/mount-utils"
+
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
 	"k8s.io/cloud-provider-openstack/pkg/util/blockdevice"
-	cpoerrors "k8s.io/cloud-provider-openstack/pkg/util/errors"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
-	mountutil "k8s.io/mount-utils"
 )
 
 type nodeServer struct {
@@ -65,22 +63,9 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, "NodePublishVolume Volume Capability must be provided")
 	}
 
-	ephemeralVolume := req.GetVolumeContext()["csi.storage.k8s.io/ephemeral"] == "true"
-	if ephemeralVolume {
-		klog.Warningf("CSI inline ephemeral volumes support is deprecated in 1.24 release.")
-		return nodePublishEphemeral(req, ns)
-	}
-
 	// In case of ephemeral volume staging path not provided
 	if len(source) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "NodePublishVolume Staging Target Path must be provided")
-	}
-	_, err := ns.Cloud.GetVolume(volumeID)
-	if err != nil {
-		if cpoerrors.IsNotFound(err) {
-			return nil, status.Error(codes.NotFound, "Volume not found")
-		}
-		return nil, status.Error(codes.Internal, fmt.Sprintf("GetVolume failed with error %v", err))
 	}
 
 	mountOptions := []string{"bind"}
@@ -117,105 +102,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
-}
-
-func nodePublishEphemeral(req *csi.NodePublishVolumeRequest, ns *nodeServer) (*csi.NodePublishVolumeResponse, error) {
-
-	var size int
-	var err error
-
-	volID := req.GetVolumeId()
-	volName := fmt.Sprintf("ephemeral-%s", volID)
-	properties := map[string]string{"cinder.csi.openstack.org/cluster": ns.Driver.cluster}
-	capacity, ok := req.GetVolumeContext()["capacity"]
-
-	volAvailability, err := ns.Metadata.GetAvailabilityZone()
-	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("retrieving availability zone from MetaData service failed with error %v", err))
-	}
-
-	size = 1 // default size is 1GB
-	if ok && strings.HasSuffix(capacity, "Gi") {
-		size, err = strconv.Atoi(strings.TrimSuffix(capacity, "Gi"))
-		if err != nil {
-			klog.V(3).Infof("Unable to parse capacity: %v", err)
-			return nil, status.Error(codes.Internal, fmt.Sprintf("Unable to parse capacity %v", err))
-		}
-	}
-
-	// Check type in given param, if not, use ""
-	volumeType, ok := req.GetVolumeContext()["type"]
-	if !ok {
-		volumeType = ""
-	}
-
-	evol, err := ns.Cloud.CreateVolume(volName, size, volumeType, volAvailability, "", "", &properties)
-
-	if err != nil {
-		klog.V(3).Infof("Failed to Create Ephemeral Volume: %v", err)
-		return nil, status.Error(codes.Internal, fmt.Sprintf("Failed to create Ephemeral Volume %v", err))
-	}
-
-	// Wait for volume status to be Available, before attaching
-	if evol.Status != openstack.VolumeAvailableStatus {
-		targetStatus := []string{openstack.VolumeAvailableStatus}
-		err := ns.Cloud.WaitVolumeTargetStatus(evol.ID, targetStatus)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, err.Error())
-		}
-	}
-
-	klog.V(4).Infof("Ephemeral Volume %s is created", evol.ID)
-
-	// attach volume
-	// for attach volume we need to have information about node.
-	nodeID, err := ns.Metadata.GetInstanceID()
-	if err != nil {
-		msg := "nodePublishEphemeral: Failed to get Instance ID: %v"
-		klog.V(3).Infof(msg, err)
-		return nil, status.Errorf(codes.Internal, msg, err)
-	}
-
-	_, err = ns.Cloud.AttachVolume(nodeID, evol.ID)
-	if err != nil {
-		msg := "nodePublishEphemeral: attach volume %s failed with error : %v"
-		klog.V(3).Infof(msg, evol.ID, err)
-		return nil, status.Errorf(codes.Internal, msg, evol.ID, err)
-	}
-
-	err = ns.Cloud.WaitDiskAttached(nodeID, evol.ID)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	m := ns.Mount
-
-	devicePath, err := getDevicePath(evol.ID, m)
-	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("Unable to find Device path for volume: %v", err))
-	}
-
-	targetPath := req.GetTargetPath()
-
-	// Verify whether mounted
-	notMnt, err := m.IsLikelyNotMountPointAttach(targetPath)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	// Volume Mount
-	if notMnt {
-		// set default fstype is ext4
-		fsType := "ext4"
-		// Mount
-		err = m.Mounter().FormatAndMount(devicePath, targetPath, fsType, nil)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-	}
-
-	return &csi.NodePublishVolumeResponse{}, nil
-
 }
 
 func nodePublishVolumeForBlock(req *csi.NodePublishVolumeRequest, ns *nodeServer, mountOptions []string) (*csi.NodePublishVolumeResponse, error) {
@@ -269,75 +155,13 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.InvalidArgument, "[NodeUnpublishVolume] volumeID must be provided")
 	}
 
-	ephemeralVolume := false
-
-	vol, err := ns.Cloud.GetVolume(volumeID)
-
-	if err != nil {
-
-		if !cpoerrors.IsNotFound(err) {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("GetVolume failed with error %v", err))
-		}
-
-		// if not found by id, try to search by name
-		volName := fmt.Sprintf("ephemeral-%s", volumeID)
-
-		vols, err := ns.Cloud.GetVolumesByName(volName)
-
-		//if volume not found then GetVolumesByName returns empty list
-		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("GetVolume failed with error %v", err))
-		}
-		if len(vols) > 0 {
-			vol = &vols[0]
-			ephemeralVolume = true
-		} else {
-			return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume not found %s", volName))
-		}
-	}
-
-	err = ns.Mount.UnmountPath(targetPath)
+	err := ns.Mount.UnmountPath(targetPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Unmount of targetpath %s failed with error %v", targetPath, err)
 	}
 
-	if ephemeralVolume {
-		return nodeUnpublishEphemeral(req, ns, vol)
-	}
-
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 
-}
-
-func nodeUnpublishEphemeral(req *csi.NodeUnpublishVolumeRequest, ns *nodeServer, vol *volumes.Volume) (*csi.NodeUnpublishVolumeResponse, error) {
-	volumeID := vol.ID
-	var instanceID string
-
-	if len(vol.Attachments) > 0 {
-		instanceID = vol.Attachments[0].ServerID
-	} else {
-		return nil, status.Error(codes.FailedPrecondition, "Volume attachement not found in request")
-	}
-
-	err := ns.Cloud.DetachVolume(instanceID, volumeID)
-	if err != nil {
-		klog.V(3).Infof("Failed to DetachVolume: %v", err)
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	err = ns.Cloud.WaitDiskDetached(instanceID, volumeID)
-	if err != nil {
-		klog.V(3).Infof("Failed to WaitDiskDetached: %v", err)
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	err = ns.Cloud.DeleteVolume(volumeID)
-	if err != nil {
-		klog.V(3).Infof("Failed to DeleteVolume: %v", err)
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-
-	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
 func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
@@ -356,14 +180,6 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 	if volumeCapability == nil {
 		return nil, status.Error(codes.InvalidArgument, "NodeStageVolume Volume Capability must be provided")
-	}
-
-	vol, err := ns.Cloud.GetVolume(volumeID)
-	if err != nil {
-		if cpoerrors.IsNotFound(err) {
-			return nil, status.Error(codes.NotFound, "Volume not found")
-		}
-		return nil, status.Error(codes.Internal, fmt.Sprintf("GetVolume failed with error %v", err))
 	}
 
 	m := ns.Mount
@@ -404,21 +220,16 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 
 	// Try expanding the volume if it's created from a snapshot or another volume (see #1539)
-	if vol.SourceVolID != "" || vol.SnapshotID != "" {
+	r := mountutil.NewResizeFs(ns.Mount.Mounter().Exec)
+	needResize, err := r.NeedResize(devicePath, stagingTarget)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not determine if volume %q need to be resized: %v", volumeID, err)
+	}
 
-		r := mountutil.NewResizeFs(ns.Mount.Mounter().Exec)
-
-		needResize, err := r.NeedResize(devicePath, stagingTarget)
-
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Could not determine if volume %q need to be resized: %v", volumeID, err)
-		}
-
-		if needResize {
-			klog.V(4).Infof("NodeStageVolume: Resizing volume %q created from a snapshot/volume", volumeID)
-			if _, err := r.Resize(devicePath, stagingTarget); err != nil {
-				return nil, status.Errorf(codes.Internal, "Could not resize volume %q:  %v", volumeID, err)
-			}
+	if needResize {
+		klog.V(4).Infof("NodeStageVolume: Resizing volume %q created from a snapshot/volume", volumeID)
+		if _, err := r.Resize(devicePath, stagingTarget); err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not resize volume %q:  %v", volumeID, err)
 		}
 	}
 
@@ -438,16 +249,7 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		return nil, status.Error(codes.InvalidArgument, "NodeUnstageVolume Staging Target Path must be provided")
 	}
 
-	_, err := ns.Cloud.GetVolume(volumeID)
-	if err != nil {
-		if cpoerrors.IsNotFound(err) {
-			klog.V(4).Infof("NodeUnstageVolume: Unable to find volume: %v", err)
-			return nil, status.Error(codes.NotFound, "Volume not found")
-		}
-		return nil, status.Error(codes.Internal, fmt.Sprintf("GetVolume failed with error %v", err))
-	}
-
-	err = ns.Mount.UnmountPath(stagingTargetPath)
+	err := ns.Mount.UnmountPath(stagingTargetPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Unmount of targetPath %s failed with error %v", stagingTargetPath, err)
 	}
@@ -539,14 +341,6 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	volumePath := req.GetVolumePath()
 	if len(volumePath) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume path not provided")
-	}
-
-	_, err := ns.Cloud.GetVolume(volumeID)
-	if err != nil {
-		if cpoerrors.IsNotFound(err) {
-			return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume with ID %s not found", volumeID))
-		}
-		return nil, status.Error(codes.Internal, fmt.Sprintf("NodeExpandVolume failed with error %v", err))
 	}
 
 	output, err := ns.Mount.GetMountFs(volumePath)

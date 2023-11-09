@@ -159,7 +159,7 @@ shell:
 # Build a single image for the local default platform and push to the local
 # container engine
 build-local-image-%:
-	$(CONTAINER_ENGINE) buildx build --output type=docker \
+	$(CONTAINER_ENGINE) buildx build --platform=linux/amd64 --output type=docker \
 		--build-arg VERSION=$(VERSION) \
 		--tag $(REGISTRY)/$*:$(VERSION) \
 		--target $* \
