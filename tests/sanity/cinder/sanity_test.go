@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kubernetes-csi/csi-test/v5/pkg/sanity"
+
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder"
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
 )
@@ -26,7 +27,7 @@ func TestDriver(t *testing.T) {
 	fakemnt := GetFakeMountProvider()
 	fakemet := &fakemetadata{}
 
-	d.SetupDriver(fakecloudprovider, fakemnt, fakemet)
+	d.SetupDriver(openstack.AllMode, fakecloudprovider, fakemnt, fakemet)
 
 	// TODO: Stop call
 

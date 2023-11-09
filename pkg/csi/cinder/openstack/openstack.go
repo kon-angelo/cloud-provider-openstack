@@ -27,12 +27,24 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/blockstorage/v3/volumes"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	"github.com/spf13/pflag"
-	gcfg "gopkg.in/gcfg.v1"
+	"gopkg.in/gcfg.v1"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"k8s.io/klog/v2"
+
 	"k8s.io/cloud-provider-openstack/pkg/client"
 	"k8s.io/cloud-provider-openstack/pkg/metrics"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
-	"k8s.io/component-base/metrics/legacyregistry"
-	"k8s.io/klog/v2"
+)
+
+type Mode string
+
+const (
+	// ControllerMode is the mode that only starts the controller service.
+	ControllerMode Mode = "controller"
+	// NodeMode is the mode that only starts the node service.
+	NodeMode Mode = "node"
+	// AllMode is the mode that only starts both the controller and the node service.
+	AllMode Mode = "all"
 )
 
 // userAgentData is used to add extra information to the gophercloud user-agent
@@ -153,7 +165,7 @@ func InitOpenStackProvider(cfgFiles []string, httpEndpoint string) {
 }
 
 // CreateOpenStackProvider creates Openstack Instance
-func CreateOpenStackProvider() (IOpenStack, error) {
+func CreateOpenStackProvider(createClients bool) (IOpenStack, error) {
 	// Get config from file
 	cfg, err := GetConfigFromFiles(configFiles)
 	if err != nil {
@@ -162,52 +174,52 @@ func CreateOpenStackProvider() (IOpenStack, error) {
 	}
 	logcfg(cfg)
 
-	provider, err := client.NewOpenStackClient(&cfg.Global, "cinder-csi-plugin", userAgentData...)
-	if err != nil {
-		return nil, err
+	// Init OpenStack
+	os := &OpenStack{
+		bsOpts:       cfg.BlockStorage,
+		metadataOpts: cfg.Metadata,
 	}
 
-	epOpts := gophercloud.EndpointOpts{
-		Region:       cfg.Global.Region,
-		Availability: cfg.Global.EndpointType,
-	}
+	if createClients {
+		provider, err := client.NewOpenStackClient(&cfg.Global, "cinder-csi-plugin", userAgentData...)
+		if err != nil {
+			return nil, err
+		}
 
-	// Init Nova ServiceClient
-	computeclient, err := openstack.NewComputeV2(provider, epOpts)
-	if err != nil {
-		return nil, err
-	}
+		os.epOpts = gophercloud.EndpointOpts{
+			Region:       cfg.Global.Region,
+			Availability: cfg.Global.EndpointType,
+		}
 
-	// Init Cinder ServiceClient
-	blockstorageclient, err := openstack.NewBlockStorageV3(provider, epOpts)
-	if err != nil {
-		return nil, err
-	}
+		// Init Nova ServiceClient
+		os.compute, err = openstack.NewComputeV2(provider, os.epOpts)
+		if err != nil {
+			return nil, err
+		}
 
+		// Init Cinder ServiceClient
+		os.blockstorage, err = openstack.NewBlockStorageV3(provider, os.epOpts)
+		if err != nil {
+			return nil, err
+		}
+
+	}
 	// if no search order given, use default
 	if len(cfg.Metadata.SearchOrder) == 0 {
 		cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", metadata.ConfigDriveID, metadata.MetadataID)
 	}
 
-	// Init OpenStack
-	OsInstance = &OpenStack{
-		compute:      computeclient,
-		blockstorage: blockstorageclient,
-		bsOpts:       cfg.BlockStorage,
-		epOpts:       epOpts,
-		metadataOpts: cfg.Metadata,
-	}
-
-	return OsInstance, nil
+	return os, nil
 }
 
 // GetOpenStackProvider returns Openstack Instance
-func GetOpenStackProvider() (IOpenStack, error) {
+func GetOpenStackProvider(mode Mode) (IOpenStack, error) {
 	if OsInstance != nil {
 		return OsInstance, nil
 	}
 	var err error
-	OsInstance, err = CreateOpenStackProvider()
+	createClients := mode != NodeMode
+	OsInstance, err = CreateOpenStackProvider(createClients)
 	if err != nil {
 		return nil, err
 	}

@@ -23,13 +23,14 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"k8s.io/component-base/cli"
+	"k8s.io/klog/v2"
+
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder"
 	"k8s.io/cloud-provider-openstack/pkg/csi/cinder/openstack"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
 	"k8s.io/cloud-provider-openstack/pkg/version"
-	"k8s.io/component-base/cli"
-	"k8s.io/klog/v2"
 )
 
 var (
@@ -38,6 +39,7 @@ var (
 	cloudConfig  []string
 	cluster      string
 	httpEndpoint string
+	mode         string
 )
 
 func main() {
@@ -90,6 +92,7 @@ func main() {
 		klog.Fatalf("Unable to mark flag cloud-config to be required: %v", err)
 	}
 
+	cmd.PersistentFlags().StringVar(&mode, "mode", "all", "Mode controls the server implementation. Supported values are controller, node and all.")
 	cmd.PersistentFlags().StringVar(&cluster, "cluster", "", "The identifier of the cluster that the plugin is running in.")
 	cmd.PersistentFlags().StringVar(&httpEndpoint, "http-endpoint", "", "The TCP network address where the HTTP server for diagnostics, including metrics and leader election health check, will listen (example: `:8080`). The default is empty string, which means the server is disabled.")
 	openstack.AddExtraFlags(pflag.CommandLine)
@@ -103,17 +106,17 @@ func handle() {
 	// Initialize cloud
 	d := cinder.NewDriver(endpoint, cluster)
 	openstack.InitOpenStackProvider(cloudConfig, httpEndpoint)
-	cloud, err := openstack.GetOpenStackProvider()
+	cloud, err := openstack.GetOpenStackProvider(openstack.Mode(mode))
 	if err != nil {
 		klog.Warningf("Failed to GetOpenStackProvider: %v", err)
 		return
 	}
-	//Initialize mount
+	// Initialize mount
 	mount := mount.GetMountProvider()
 
-	//Initialize Metadata
+	// Initialize Metadata
 	metadata := metadata.GetMetadataProvider(cloud.GetMetadataOpts().SearchOrder)
 
-	d.SetupDriver(cloud, mount, metadata)
+	d.SetupDriver(openstack.Mode(mode), cloud, mount, metadata)
 	d.Run()
 }
