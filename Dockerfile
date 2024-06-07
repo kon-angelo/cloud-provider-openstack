@@ -14,7 +14,7 @@
 ##                               BUILD ARGS                                   ##
 ################################################################################
 # This build arg allows the specification of a custom Golang image.
-ARG GOLANG_IMAGE=golang:1.22.2
+ARG GOLANG_IMAGE=golang:1.22.4
 
 # The distroless image on which the CPI manager image is built.
 #
@@ -26,7 +26,7 @@ ARG DISTROLESS_IMAGE=registry.k8s.io/build-image/go-runner:v2.3.1-go1.22.2-bookw
 
 # We use Alpine as the source for default CA certificates and some output
 # images
-ARG ALPINE_IMAGE=alpine:3.17.5
+ARG ALPINE_IMAGE=alpine:3.20.0
 
 # cinder-csi-plugin uses Debian as a base image
 ARG DEBIAN_IMAGE=registry.k8s.io/build-image/debian-base:bullseye-v1.4.3
